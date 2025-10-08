@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>3連ストップウォッチ（プロジェクト別）</title>
+<meta name="description" content="3つの独立したストップウォッチを同時に使えるミニアプリ。個別/一括の開始・停止・リセット、名前変更、CSVエクスポート対応。">
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans JP",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:#f7f7f8;color:#111}
+.header{display:flex;gap:12px;justify-content:center;align-items:center;padding:16px}
+.btn{appearance:none;border:0;border-radius:12px;padding:10px 14px;cursor:pointer;background:#111;color:#fff;font-weight:700}
+.btn.sec{background:#eee;color:#111}
+.btn.warn{background:#e83f3f}
+.wrap{max-width:1100px;margin:0 auto;padding:16px}
+.grid{display:grid;gap:16px}
+@media(min-width:900px){.grid{grid-template-columns:repeat(3,1fr)}}
+.card{background:#fff;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,.08);padding:18px;display:flex;flex-direction:column;gap:12px}
+.title{display:flex;gap:8px;align-items:center}
+.title input{flex:1;min-width:0;border:1px solid #e5e5e5;border-radius:10px;padding:8px 10px;font-size:16px}
+.timer{font-variant-numeric:tabular-nums;font-size:clamp(28px,6vw,48px);letter-spacing:.02em;text-align:center}
+.sub{color:#666;text-align:center;font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;justify-content:center}
+.row .btn{min-width:110px}
+.tools{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.tools .left{display:flex;gap:8px;align-items:center}
+.badge{border:1px solid #ddd;background:#fff;border-radius:999px;padding:6px 10px;font-weight:700}
+.small{font-size:12px;color:#777}
+.laps{border-top:1px solid #eee;padding-top:10px;max-height:200px;overflow:auto}
+.laps table{width:100%;border-collapse:collapse;font-size:14px}
+.laps th,.laps td{padding:6px 4px;border-bottom:1px solid #f0f0f0;text-align:right}
+.laps th:first-child,.laps td:first-child{text-align:left}
+footer{padding:16px;text-align:center;color:#777;font-size:12px}
+</style>
+</head>
+<body>
+  <div class="header">
+    <button class="btn" id="startAll">全て開始</button>
+    <button class="btn sec" id="stopAll">全て停止</button>
+    <button class="btn warn" id="resetAll">全てリセット</button>
+  </div>
+
+  <div class="wrap">
+    <div class="grid" id="grid">
+      <!-- 3 lanes will be inserted here by JS -->
+    </div>
+  </div>
+
+  <footer>高精度（<code>performance.now()</code>）で計測。データはブラウザに保存（自動）。CSVエクスポート可。</footer>
+
+<script>
+(() => {
+  const fmt = (ms) => {
+    if (ms < 0) ms = 0;
+    const m = Math.floor(ms/60000);
+    const s = Math.floor((ms%60000)/1000);
+    const x = Math.floor(ms%1000);
+    return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(x).padStart(3,'0')}`;
+  };
+
+  class Stopwatch {
+    constructor(index, mount){
+      this.index = index;
+      this.mount = mount;
+      this.running = false; this.base=0; this.startPerf=0; this.raf=0; this.laps=[];
+      this.name = `プロジェクト ${index+1}`;
+      this.render();
+      this.restore();
+      this.paint();
+    }
+    el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstElementChild; }
+    render(){
+      this.root = this.el(`
+        <div class="card" aria-live="polite">
+          <div class="title">
+            <span class="badge">#${this.index+1}</span>
+            <input type="text" value="${this.name}" aria-label="プロジェクト名" />
+          </div>
+          <div class="timer">00:00.000</div>
+          <div class="sub">Space: 開始/停止（カード選択時） / L: ラップ / R: リセット</div>
+          <div class="row">
+            <button class="btn start">開始</button>
+            <button class="btn sec lap" disabled>ラップ</button>
+            <button class="btn sec reset" disabled>リセット</button>
+            <button class="btn sec export" disabled>CSV</button>
+          </div>
+          <div class="tools">
+            <div class="left small">ラップ：<span class="lapCount">0</span> 件</div>
+            <button class="btn sec copy">テキストコピー</button>
+          </div>
+          <div class="laps" hidden>
+            <table>
+              <thead><tr><th>#</th><th>ラップ</th><th>累計</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>`);
+      this.mount.appendChild(this.root);
+      // refs
+      this.nameInput = this.root.querySelector('input');
+      this.display   = this.root.querySelector('.timer');
+      this.startBtn  = this.root.querySelector('.start');
+      this.lapBtn    = this.root.querySelector('.lap');
+      this.resetBtn  = this.root.querySelector('.reset');
+      this.exportBtn = this.root.querySelector('.export');
+      this.copyBtn   = this.root.querySelector('.copy');
+      this.lapsBox   = this.root.querySelector('.laps');
+      this.lapCount  = this.root.querySelector('.lapCount');
+      this.tbody     = this.root.querySelector('tbody');
+
+      // events
+      this.startBtn.addEventListener('click', ()=> this.running? this.stop(): this.start());
+      this.lapBtn.addEventListener('click', ()=> this.addLap());
+      this.resetBtn.addEventListener('click', ()=> this.reset());
+      this.exportBtn.addEventListener('click', ()=> this.downloadCSV());
+      this.copyBtn.addEventListener('click', ()=> this.copyText());
+      this.nameInput.addEventListener('change', ()=>{ this.name=this.nameInput.value.trim()||`プロジェクト ${this.index+1}`; this.persist(); });
+
+      // keyboard focus handling
+      this.root.tabIndex = 0; // focusable for key handling
+      this.root.addEventListener('keydown', (e)=>{
+        if (['INPUT','TEXTAREA'].includes(document.activeElement.tagName)) return;
+        if (e.code==='Space'){ e.preventDefault(); this.running? this.stop(): this.start(); }
+        else if (e.key.toLowerCase()==='l'){ if (this.running) this.addLap(); }
+        else if (e.key.toLowerCase()==='r'){ this.reset(); }
+      });
+    }
+    now(){ return this.running ? this.base + (performance.now() - this.startPerf) : this.base; }
+    tick(){ this.display.textContent = fmt(this.now()); this.raf = requestAnimationFrame(()=>this.tick()); }
+    paint(){ this.display.textContent = fmt(this.base); this.renderLaps(); this.setUI(false); }
+    setUI(run){
+      this.running = run;
+      this.startBtn.textContent = run? '一時停止' : (this.base? '再開':'開始');
+      this.lapBtn.disabled = !run;
+      const hasData = !!this.base || this.laps.length>0;
+      this.resetBtn.disabled = !hasData;
+      this.exportBtn.disabled = this.laps.length===0;
+    }
+    start(){ if (this.running) return; this.startPerf = performance.now(); this.setUI(true); this.raf = requestAnimationFrame(()=>this.tick()); this.persist(); }
+    stop(){ if (!this.running) return; cancelAnimationFrame(this.raf); this.base = this.now(); this.setUI(false); this.persist(); }
+    reset(){ cancelAnimationFrame(this.raf); this.base=0; this.laps=[]; this.renderLaps(); this.display.textContent='00:00.000'; this.setUI(false); this.persist(); }
+    addLap(){ const total=this.now(); const prev=this.laps.length? this.laps[this.laps.length-1].total:0; const lap=total-prev; this.laps.push({lap,total}); this.renderLaps(); this.persist(); }
+    renderLaps(){
+      this.tbody.innerHTML='';
+      this.lapCount.textContent = this.laps.length;
+      if (this.laps.length===0){ this.lapsBox.hidden=true; return; }
+      this.lapsBox.hidden=false;
+      this.laps.forEach((lp,i)=>{
+        const tr=document.createElement('tr');
+        tr.innerHTML = `<td style="text-align:left">${i+1}</td><td>${fmt(lp.lap)}</td><td>${fmt(lp.total)}</td>`;
+        this.tbody.appendChild(tr);
+      });
+      this.exportBtn.disabled = false;
+    }
+    csv(){ const header='Index,Lap,Total\n'; const lines=this.laps.map((lp,i)=>`${i+1},${fmt(lp.lap)},${fmt(lp.total)}`).join('\n'); return header+lines+'\n'; }
+    downloadCSV(){ const blob=new Blob([this.csv()],{type:'text/csv;charset=utf-8;'}); const url=URL.createObjectURL(blob); const a=document.createElement('a'); a.href=url; a.download=`${this.name.replace(/\s+/g,'_')}-laps-${new Date().toISOString().replace(/[:.]/g,'-')}.csv`; a.click(); URL.revokeObjectURL(url); }
+    async copyText(){ const t=this.laps.map((lp,i)=>`#${i+1}\tLap ${fmt(lp.lap)}\tTotal ${fmt(lp.total)}`).join('\n') || '（ラップなし）'; try{ await navigator.clipboard.writeText(t); alert('コピーしました'); }catch{ alert('コピーに失敗しました'); } }
+    toJSON(){ return {name:this.name, base:this.base, laps:this.laps}; }
+    fromJSON(d){ this.name=d?.name||this.name; this.base=d?.base||0; this.laps=Array.isArray(d?.laps)? d.laps:[]; this.nameInput.value=this.name; }
+    persist(){ try{ const store=JSON.parse(localStorage.getItem('msw-3')||'{}'); store[`lane${this.index}`]=this.toJSON(); localStorage.setItem('msw-3', JSON.stringify(store)); }catch{} }
+    restore(){ try{ const store=JSON.parse(localStorage.getItem('msw-3')||'{}'); this.fromJSON(store[`lane${this.index}`]); }catch{} }
+  }
+
+  // Mount 3 lanes
+  const grid = document.getElementById('grid');
+  const lanes = [0,1,2].map(i=> new Stopwatch(i, grid));
+
+  // Global controls
+  const startAll = document.getElementById('startAll');
+  const stopAll  = document.getElementById('stopAll');
+  const resetAll = document.getElementById('resetAll');
+  startAll.addEventListener('click', ()=> lanes.forEach(l=> l.start()));
+  stopAll .addEventListener('click', ()=> lanes.forEach(l=> l.stop()));
+  resetAll.addEventListener('click', ()=> lanes.forEach(l=> l.reset()));
+
+  // Visibility repaint (for perceived accuracy on tab switch)
+  document.addEventListener('visibilitychange', ()=>{
+    if (document.visibilityState==='visible') lanes.forEach(l=> l.display.textContent = fmt(l.now()));
+  });
+})();
+</script>
+</body>
+</html>
